@@ -174,6 +174,7 @@
             dockerCredentialUp = pkgs.upbound;
           };
           stop = apps.stop { inherit crossplane; };
+          e2e-local = apps.e2eLocal { inherit crossplane functionsPkg; };
           docs-serve = apps.docsServe { };
           docs-generate = apps.docsGenerate { };
         }

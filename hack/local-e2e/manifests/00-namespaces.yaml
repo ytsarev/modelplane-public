@@ -1,0 +1,7 @@
+# The model resources live in ml-team; applied via --extra-resources before
+# them. modelplane-system is created earlier via --init-resources (alongside the
+# workload kubeconfig Secret run.sh builds).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ml-team
