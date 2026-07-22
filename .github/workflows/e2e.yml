@@ -1,0 +1,92 @@
+name: E2E
+
+# The local two-cluster e2e (hack/local-e2e) is heavy — two kind clusters plus
+# the full serving stack, ~15-20 min — so it doesn't run on every push. Add the
+# `test-e2e` label to a PR to run it (it re-runs on each push while the label is
+# set), or trigger it manually. Unlike the package push, it needs no cloud or
+# registry credentials.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch: {}
+
+# Cancel in-progress runs for the same PR. Runs on main are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || contains(github.event.pull_request.labels.*.name, 'test-e2e')
+    runs-on: ubuntu-24.04
+    # Generous: a cold Nix cache (the Actions cache throttles) rebuilds the
+    # function images, on top of the two-cluster bring-up and serving-stack
+    # install. 45m was too tight on a cold run.
+    timeout-minutes: 60
+
+    steps:
+      # Two kind clusters and the serving stack need more disk than the runner
+      # has free by default, the same reason the push-package job reclaims space.
+      - name: Cleanup Disk
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          tool-cache: true
+          swap-storage: false
+          large-packages: false
+          docker-images: false
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: log-lines = 500
+
+      # See ci.yml for why use-flakehub is off.
+      - name: Cache Nix store
+        uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
+        with:
+          use-flakehub: false
+
+      # The exact command a developer runs locally (--print-build-logs is only CI
+      # verbosity), so a green run here and a green run on a laptop mean the same
+      # thing. It brings up both clusters, deploys the mock model, waits for the
+      # ModelService, and asserts a live 200 — exiting non-zero on any failure.
+      - name: Run e2e
+        run: nix run .#e2e-local --print-build-logs -- --verify
+
+      # On failure, capture what the clusters looked like before teardown.
+      # `kind export logs` dumps every pod's logs (crossplane, providers, the
+      # serving stack); the status snapshots make triage quick.
+      - name: Collect diagnostics
+        if: failure()
+        run: |
+          mkdir -p e2e-logs
+          nix develop --command bash -c '
+            kind export logs e2e-logs/control-plane --name modelplane-local || true
+            kind export logs e2e-logs/workload --name modelplane-workload || true
+            kubectl --context kind-modelplane-local get composite -o wide > e2e-logs/composites.txt 2>&1 || true
+            kubectl --context kind-modelplane-local -n ml-team get modeldeployment,modelreplica,modelendpoint,modelservice -o yaml > e2e-logs/model.yaml 2>&1 || true
+          '
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-diagnostics
+          path: e2e-logs
+          if-no-files-found: ignore
+
+      # Always tear both clusters down, even on failure or cancellation.
+      - name: Teardown
+        if: always()
+        run: nix run .#e2e-local -- --clean
